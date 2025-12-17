@@ -4,6 +4,9 @@ import numpy as np
 from scipy.linalg import expm
 import matplotlib.pyplot as plt
 from scipy.linalg import expm
+
+from scipy.linalg import expm
+import numpy as np
 from copy import deepcopy
 from scipy.interpolate import interp1d
 
@@ -170,7 +173,10 @@ def transient_response_for_surge(ad_hs, ad_hm, ad_icu, T_surge=14, dt=0.5):
     return ts_results
 
 
-T_surge=14
+
+
+
+T_surge=5
 def ed_ode(y, t, params):
     W, S, B_Hs, B_Hm, B_I, Hs, Hm, I, D = y
     if t <= T_surge:
@@ -221,42 +227,242 @@ def ed_ode(y, t, params):
 
     return [dW, dS, dB_Hs, dB_Hm, dB_I, dHs, dHm, dI, dD]
 
-t = np.arange(94)
-params = (1.1 *Ad_Hs_mean, 1.2 * Ad_Hm_mean,  1.5 *Ad_ICU_mean)
 
-mu = odeint(ed_ode, y0, t, hmax=0.5, mxstep=5000, rtol=1e-3, atol=1e-3, args=(params,) )
 
-mu_Hs= mu[:,5]
-mu_Hm= mu[:,6]
-mu_I= mu[:,7]
+
+############################
+surge_windows = {
+    'Hs': [(3, 7)],
+    'Hm': [(1, 5), (10, 20)],
+    'I' : [(3, 4)]
+}
+
+def is_in_any_window(t, windows):
+    return any(t0 <= t <= t1 for (t0, t1) in windows)
+
+def active_surge_amplitude(t, windows, baseline):
+    """
+    Returns surge amplitude if t is in any window,
+    otherwise returns baseline.
+    If multiple windows overlap, amplitudes are summed.
+    """
+    amp = baseline
+    for (t0, t1, a) in windows:
+        if t0 <= t <= t1:
+            amp += (a - baseline)
+    return amp
+
+
+def ed_ode2(y, t, surge_specs):
+    W, S, B_Hs, B_Hm, B_I, Hs, Hm, I, D = y
+
+    # Time-dependent admissions
+    ad_hs = active_surge_amplitude(t, surge_specs['Hs'], Ad_Hs_mean)
+    ad_hm = active_surge_amplitude(t, surge_specs['Hm'], Ad_Hm_mean)
+    ad_icu = active_surge_amplitude(t, surge_specs['I'],  Ad_ICU_mean)
+
+    sigma = fixed_params['sigma']
+    omega = fixed_params['omega']
+    gamma = fixed_params['gamma']
+
+    pED_Hs = fixed_params['pED_Hs']
+    pED_Hm = fixed_params['pED_Hm']
+    pED_ICU = fixed_params['pED_ICU']
+
+    xi_Hs = fixed_params['xi_Hs']
+    xi_Hm = fixed_params['xi_Hm']
+    xi_I  = fixed_params['xi_I']
+
+    varphi_I = fixed_params['varphi_I']
+    varphi_D = fixed_params['varphi_D']
+    varphi_Hm = fixed_params['varphi_Hm']
+
+    eps_Hs = fixed_params['eps_Hs']
+    eps_Hm = fixed_params['eps_Hm']
+    eps_D  = fixed_params['eps_D']
+
+    psi_I = fixed_params['psi_I']
+    psi_D = fixed_params['psi_D']
+
+    lam = arrivals_mean
+
+    dW = lam - (sigma + omega) * W
+    dS = sigma * W - gamma * S
+
+    dB_Hs = pED_Hs * gamma * S - xi_Hs * B_Hs
+    dB_Hm = pED_Hm * gamma * S - xi_Hm * B_Hm
+    dB_I  = pED_ICU * gamma * S - xi_I * B_I
+
+    Admissions_Hs = xi_Hs * B_Hs + ad_hs + At_Hs_mean
+    Admissions_Hm = xi_Hm * B_Hm + ad_hm + At_Hm_mean
+    Admissions_I  = xi_I  * B_I  + ad_icu + At_ICU_mean
+
+    dHs = Admissions_Hs + eps_Hs * I - (varphi_I + varphi_D + varphi_Hm) * Hs
+    dHm = Admissions_Hm + eps_Hm * I + varphi_Hm * Hs - (psi_I + psi_D) * Hm
+    dI  = Admissions_I  + varphi_I * Hs + psi_I * Hm - (eps_Hs + eps_Hm + eps_D) * I
+    dD  = varphi_D * Hs + psi_D * Hm + eps_D * I
+
+    return [dW, dS, dB_Hs, dB_Hm, dB_I, dHs, dHm, dI, dD]
+
+
+def transient_response_for_multi_surge(surge_specs, times):
+
+    # Baseline equilibrium
+    eq = compute_equilibrium_data(
+        fixed_params, arrivals_mean,
+        Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean,
+        At_Hs_mean, At_Hm_mean, At_ICU_mean
+    )
+
+    x0 = np.array([eq['Hs'], eq['Hm'], eq['I']])
+
+    J_full, eigvals = jacobian_at_equilibrium(fixed_params)
+    J = J_full[:3, :3]
+
+    x_ts = np.zeros((len(times), 3))
+    x_ts[0] = x0.copy()
+
+    # Precompute equilibrium shifts per surge event
+    surge_deltas = []
+
+    for comp, windows in surge_specs.items():
+        for (t_on, t_off, amp) in windows:
+            xs = compute_equilibrium_data(
+                fixed_params,
+                arrivals_mean,
+                amp + Ad_Hs_mean if comp == 'Hs' else Ad_Hs_mean,
+                amp + Ad_Hm_mean  if comp == 'Hm' else Ad_Hm_mean,
+                amp + Ad_ICU_mean if comp == 'I'  else Ad_ICU_mean,
+                At_Hs_mean, At_Hm_mean, At_ICU_mean
+            )
+            x_step = np.array([xs['Hs'], xs['Hm'], xs['I']])
+            surge_deltas.append((t_on, t_off, x_step - x0))
+
+    # Superposition of linear responses
+    for k, t in enumerate(times):
+        z = np.zeros(3)
+
+        for (t_on, t_off, delta_eq) in surge_deltas:
+            if t < t_on:
+                continue
+
+            elif t_on <= t <= t_off:
+                tau = t - t_on
+                z += (np.eye(3) - expm(J * tau)).dot(delta_eq)
+
+            else:
+                tau_s = t_off - t_on
+                z_T = (np.eye(3) - expm(J * tau_s)).dot(delta_eq)
+                z += expm(J * (t - t_off)).dot(z_T)
+
+        x_ts[k] = x0 + z
+
+
+    #######
+    extra_beddays = np.trapz(np.sum(x_ts - x0, axis=1), times)  # total extra bed-days across all 3 comps
+    extra_beddays_per_comp = {'Hs': np.trapz(x_ts[:, 0] - x0[0], times),
+                              'Hm': np.trapz(x_ts[:, 1] - x0[1], times),
+                              'I': np.trapz(x_ts[:, 2] - x0[2], times)}
+
+    # Pack results
+    ts_results = {'times': times, 'x_ts': x_ts, 'x0': x0, 'x_step': x_step,
+                  'extra_beddays_total': extra_beddays,
+                  'extra_beddays_per_comp': extra_beddays_per_comp,
+                  'eigvals': eigvals}
+    ########
+    return ts_results
+    #return {'times': times,  'x_ts': x_ts, 'x0': x0,  'eigvals': eigvals }
+
 
 if __name__ == '__main__':
-    #---------------------- Transient response for surge
-    res = transient_response_for_surge(ad_hs= 1.1 * Ad_Hs_mean, ad_hm= 1.2 * Ad_Hm_mean, ad_icu= 1.5 * Ad_ICU_mean, T_surge=14, dt=0.5)
 
-    times = res['times'];
-    x_ts = res['x_ts'];
-    x0 = res['x0']
+    # --------------------------------------------------
+    # 1) Define surge events (MULTIPLE per compartment)
+    #    Each tuple = (start_day, end_day, amplitude)
+    # --------------------------------------------------
+    surge_specs1 = {
+        'Hs': [
+            (3, 7,  2),
+            (8, 10, 5)
+        ],
+        'Hm': [
+            (1, 10,  2),
+            (5, 20, 1)
+        ],
+        'I': [ (3, 4,  1) ]
+    }
+    surge_specs = {
+        'Hs': [
+            (3, 7,  2 + Ad_Hs_mean),
+            (8, 10, 5 + Ad_Hs_mean)
+        ],
+        'Hm': [
+            (1, 10,   2 + Ad_Hm_mean),
+            (5, 20, 1+ Ad_Hm_mean)
+        ],
+        'I': [(3, 4, 1 + Ad_ICU_mean)]
+    }
 
-    plt.figure(figsize=(10, 5))
-    #plt.plot(times, x_ts[:, 0], label='Hs (total)')
-    plt.plot(t, mu_Hm, label='Hm', ls='--')
-    plt.plot(times, x_ts[:, 1], label='Hm (total)')
-    #plt.plot(times, x_ts[:, 2], label='ICU (I)')
-    plt.axvline(21, color='k', linestyle='--', label='Surge off (day 21)')
-    plt.hlines(x0, times[0], times[-1], colors=['C0', 'C1', 'C2'], linestyles=':', label='Baseline')
-    plt.xlabel('Days since surge start')
-    plt.ylabel('Occupancy (beds)')
-    plt.title('Transient occupancy during +50% direct Hm admission surge (21 days)')
-    plt.legend()
-    plt.grid(True)
+    # --------------------------------------------------
+    # 2) Time grid (SHARED by ODE and analytic solution)
+    # --------------------------------------------------
+    dt = 0.5
+    t_end = max(w[1] for comp in surge_specs.values() for w in comp) + 80
+    times = np.arange(0, t_end + dt, dt)
+
+    # --------------------------------------------------
+    # 3) Initial condition from equilibrium
+    # --------------------------------------------------
+    y0_dict = compute_equilibrium_data(
+        fixed_params, arrivals_mean,
+        Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean,
+        At_Hs_mean, At_Hm_mean, At_ICU_mean
+    )
+    y0 = np.array(list(y0_dict.values()))
+
+    # --------------------------------------------------
+    # 4) Solve FULL NONLINEAR ODE
+    # --------------------------------------------------
+    mu = odeint(
+        ed_ode2,
+        y0,
+        times,
+        args=(surge_specs,),
+        rtol=1e-6,
+        atol=1e-6,
+        mxstep=5000
+    )
+
+    mu_Hs = mu[:, 5]
+    mu_Hm = mu[:, 6]
+    mu_I  = mu[:, 7]
+
+    # --------------------------------------------------
+    # 5) Solve LINEARIZED ANALYTIC MODEL
+    # --------------------------------------------------
+    res = transient_response_for_multi_surge(surge_specs1, times)
+    x_ts = res['x_ts']
+
+    # --------------------------------------------------
+    # 6) Plot comparison
+    # --------------------------------------------------
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+
+    labels = ['Hs', 'Hm', 'ICU']
+    analytic = [x_ts[:, 0], x_ts[:, 1], x_ts[:, 2]]
+    ode_sol  = [mu_Hs, mu_Hm, mu_I]
+
+    for i, ax in enumerate(axes):
+        ax.plot(times, analytic[i], label=f'{labels[i]} (analytic)', lw=2)
+        ax.plot(times, ode_sol[i], '--', label=f'{labels[i]} (ODE)', lw=2, alpha=0.8)
+        ax.set_ylabel('Beds')
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+    axes[-1].set_xlabel('Time (days)')
+    fig.suptitle('Multi-surge validation: analytic vs ODE', fontsize=16)
+    plt.tight_layout()
     plt.show()
-    # Print cumulative extra bed-days
-    print('Extra bed-days (total, across Hs+Hm+I approx):', res['extra_beddays_total'])
-    print('Extra bed-days per compartment:', res['extra_beddays_per_comp'])
-
-    #--------
-    #cap_med_surg = int((df['TTL_BEDS_MED_SURG_TELE'] - df['UNAVBL_BEDS_MED_SURG_TELE']).median())
 
 
 
