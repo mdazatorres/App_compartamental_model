@@ -10,7 +10,7 @@ from plotly.subplots import make_subplots
 from matplotlib.colors import TwoSlopeNorm
 # NOTE: Replace the following two lines by the actual import that gives you `df`, `fixed_params`, and the functions.
 from model_full_equilibrium_points import (
-    procces_data, compute_params_from_df, compute_equilibrium_data,
+    procces_data, compute_params_from_df, compute_equilibrium_data,transient_response_for_multi_surge,
      transient_response_for_surge,fixed_params, jacobian_at_equilibrium, Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean, df
 )
 # ---- END initialization/import ----
@@ -167,46 +167,145 @@ if mode == "Equilibrium":
 # ---------- SURGE SWEEP PAGE ----------
 elif mode=="Transient surge":
 
-    col1, col2, col3, col4= st.columns(4)
+    #####################
+    st.subheader("📈 Surge Scenarios")
 
-    with col1:
-        surge_Ad_Hs = st.number_input( "IP Surge", min_value=1.0, max_value=20.0, value=1.0, step=1.0,help="Increase in IP direct admissions")
-    with col2:
-        surge_Ad_Hm = st.number_input("Med Surge", min_value=1.0, max_value=20.0, value=1.0, step=1.0,help="Increase in medical ward admissions")
-    with col3:
-        surge_Ad_ICU = st.number_input( "ICU Surge",min_value=1.0, max_value=20.0, value=1.0, step=1.0, help="Increase in ICU admissions" )
-    with col4:
-        t_surge = st.number_input("Days of the surge", min_value=0.0, max_value=50.0, value=5.0, step=1.0,
-                                  help="T surge")
+    surge_specs = {'Hs': [], 'Hm': [], 'I': []}
 
-    res=transient_response_for_surge(ad_hs= Ad_Hs_mean+surge_Ad_Hs, ad_hm= Ad_Hm_mean+surge_Ad_Hm, ad_icu= Ad_ICU_mean+surge_Ad_ICU, T_surge=t_surge, dt=0.5)
+    dt = 0.5
 
-    times = res['times'];
-    x_ts = res['x_ts'];
+    for comp, label, base in [
+        ('Hs', 'IP (Hs)', Ad_Hs_mean),
+        ('Hm', 'Medical (Hm)', Ad_Hm_mean),
+        ('I', 'ICU (I)', Ad_ICU_mean)
+    ]:
+        with st.expander(f"{label} surge events"):
+            n_events = st.number_input(
+                f"Number of {label} surge events",
+                min_value=0, max_value=5, value=1, step=1,
+                key=f"n_{comp}"
+            )
+
+            for k in range(n_events):
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    t_on = st.number_input(
+                        f"{label} surge {k + 1} start",
+                        min_value=0.0, max_value=100.0, value=0.0, step=1.0,
+                        key=f"{comp}_on_{k}"
+                    )
+                with col2:
+                    t_off = st.number_input(
+                        f"{label} surge {k + 1} end",
+                        min_value=t_on, max_value=150.0, value=t_on + 5.0, step=1.0,
+                        key=f"{comp}_off_{k}"
+                    )
+                with col3:
+                    amp = st.number_input(
+                        f"{label} surge {k + 1}: extra admissions per day",
+                        min_value=0.0, max_value=50.0, value=1.0, step=1.0,
+                        help="Total direct admissions during surge",
+                        key=f"{comp}_amp_{k}"
+                    )
+
+                surge_specs[comp].append((t_on, t_off, amp))
+
+    if all(len(v) == 0 for v in surge_specs.values()):
+        st.warning("No surge events defined.")
+        st.stop()
+
+    t_end = max(w[1] for comp in surge_specs.values() for w in comp) + 80
+    times = np.arange(0, t_end + dt, dt)
+
+
+
+    res = transient_response_for_multi_surge(surge_specs, times)
+
+    x_ts = res['x_ts']
     x0 = res['x0']
 
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
 
-    fig = make_subplots(rows=3, cols=1)
-    fig.add_trace(go.Scatter(x=times, y=x_ts[:, 0], mode='lines', name='Hs (total)',
-                             line=dict(color='blue')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=times, y=x_ts[:, 1], mode='lines', name='Hm (total)',
-                             line=dict(color='green')), row=2, col=1)
-    fig.add_trace(go.Scatter(x=times, y=x_ts[:, 2], mode='lines', name='ICU (I)',
-                             line=dict(color='purple')), row=3, col=1)
+    colors = ['blue', 'green', 'purple']
+    labels = ['Hs', 'Hm', 'ICU']
 
-    #fig.add_vline(x=14, line_width=2, line_dash="dash", line_color="black")
+    for i in range(3):
+        fig.add_trace(
+            go.Scatter(
+                x=times,
+                y=x_ts[:, i],
+                mode='lines',
+                name=f"{labels[i]} occupancy",
+                line=dict(color=colors[i])
+            ),
+            row=i + 1, col=1
+        )
 
-    # Baseline horizontal lines
-    fig.add_hline(y=x0[0], line_dash="dot", line_color="blue", row=1, col=1)
-    fig.add_hline(y=x0[1], line_dash="dot", line_color="green", row=2, col=1)
-    fig.add_hline(y=x0[2], line_dash="dot", line_color="purple", row=3, col=1)
+        fig.add_hline(
+            y=x0[i],
+            line_dash="dot",
+            line_color=colors[i],
+            row=i + 1, col=1
+        )
 
-    fig.update_layout( title="Transient occupancy during admission surge",
-        xaxis_title="Days since surge start",
-        yaxis_title="Occupancy (beds)",
-        template="plotly_white")
+    fig.update_xaxes(title_text="Days", row=3, col=1)
+
+    fig.update_layout(
+        title="Transient occupancy under multiple surge scenarios",
+        yaxis_title="Beds",
+        template="plotly_white",
+        height=700
+    )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    #####################
+
+
+    # st.subheader('old option')
+    #
+    # col1, col2, col3, col4= st.columns(4)
+    #
+    # with col1:
+    #     surge_Ad_Hs = st.number_input( "IP Surge", min_value=1.0, max_value=20.0, value=1.0, step=1.0,help="Increase in IP direct admissions")
+    # with col2:
+    #     surge_Ad_Hm = st.number_input("Med Surge", min_value=1.0, max_value=20.0, value=1.0, step=1.0,help="Increase in medical ward admissions")
+    # with col3:
+    #     surge_Ad_ICU = st.number_input( "ICU Surge",min_value=1.0, max_value=20.0, value=1.0, step=1.0, help="Increase in ICU admissions" )
+    # with col4:
+    #     t_surge = st.number_input("Days of the surge", min_value=0.0, max_value=50.0, value=5.0, step=1.0,
+    #                               help="T surge")
+    #
+    # res=transient_response_for_surge(ad_hs= Ad_Hs_mean+surge_Ad_Hs, ad_hm= Ad_Hm_mean+surge_Ad_Hm, ad_icu= Ad_ICU_mean+surge_Ad_ICU, T_surge=t_surge, dt=0.5)
+    #
+    # times = res['times'];
+    # x_ts = res['x_ts'];
+    # x0 = res['x0']
+    #
+    #
+    # fig = make_subplots(rows=3, cols=1)
+    # fig.add_trace(go.Scatter(x=times, y=x_ts[:, 0], mode='lines', name='Hs (total)',
+    #                          line=dict(color='blue')), row=1, col=1)
+    # fig.add_trace(go.Scatter(x=times, y=x_ts[:, 1], mode='lines', name='Hm (total)',
+    #                          line=dict(color='green')), row=2, col=1)
+    # fig.add_trace(go.Scatter(x=times, y=x_ts[:, 2], mode='lines', name='ICU (I)',
+    #                          line=dict(color='purple')), row=3, col=1)
+    #
+    # #fig.add_vline(x=14, line_width=2, line_dash="dash", line_color="black")
+    #
+    # # Baseline horizontal lines
+    # fig.add_hline(y=x0[0], line_dash="dot", line_color="blue", row=1, col=1)
+    # fig.add_hline(y=x0[1], line_dash="dot", line_color="green", row=2, col=1)
+    # fig.add_hline(y=x0[2], line_dash="dot", line_color="purple", row=3, col=1)
+    #
+    # fig.update_xaxes(title_text="Days since surge start", row=3, col=1)
+    #
+    # fig.update_layout( title="Transient occupancy during admission surge",
+    #     yaxis_title="Occupancy (beds)",
+    #     template="plotly_white")
+    #
+    # st.plotly_chart(fig, use_container_width=True)
 
     extra_beds_over_time = x_ts - x0
     #extra_beddays_per_comps= res['extra_beddays_per_comp']
