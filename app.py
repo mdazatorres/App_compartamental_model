@@ -193,7 +193,7 @@ else : #mode=="Transient surge":
 
     #########
     from plotly.subplots import make_subplots
-
+    #def occupancy_under_scenarios
     fig = make_subplots(
         rows=3,
         cols=1,
