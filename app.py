@@ -58,7 +58,6 @@ if mode == "Equilibrium":
 
 
     df, fixed_params = load_data(init_day_str, end_day_str)
-
     arrivals = df['DAILY_ED_ARRIVALS'].values
     T = len(arrivals)
     t_data = np.arange(len(arrivals))
@@ -113,95 +112,156 @@ if mode == "Equilibrium":
 
 
 
-# ---------- SURGE SWEEP PAGE ----------
+
 else : #mode=="Transient surge":
+    # ---------- SURGE scenario selection ----------
     st.subheader("📈 Surge Scenarios Analysis")
     st.markdown("Specify the timing, duration, and intensity of admission surges by unit." )
     surge_specs = {'Hs': [], 'Hm': [], 'I': []}
 
     dt = 1.0
-    for comp, label, base in [
-        ('Hs', 'IP (Hs)', Ad_Hs_mean),
-        ('Hm', 'Medical (Hm)', Ad_Hm_mean),
-        ('I', 'ICU (I)', Ad_ICU_mean)]:
-
+    for comp, label, base in [('Hs', 'IP (Hs)', Ad_Hs_mean), ('Hm', 'Medical (Hm)', Ad_Hm_mean),
+                              ('I', 'ICU (I)', Ad_ICU_mean)]:
+        # Number of surge events for this unit
         with st.expander(f"{label} surge events"):
-            n_events = st.number_input(
-                f"Number of {label} surge events",
-                min_value=0, max_value=5, value=1, step=1,
-                key=f"n_{comp}")
+            n_events = st.number_input(f"Number of {label} surge events",
+                min_value=0, max_value=5, value=1, step=1, key=f"n_{comp}")
 
+        # Collect parameters for each surge event
             for k in range(n_events):
                 col1, col2, col3 = st.columns(3)
-                with col1:
+                with col1:  # Surge start time (days)
                     t_on = st.number_input( f"{label} surge {k + 1} start",
                         min_value=0.0, max_value=100.0, value=0.0, step=1.0, key=f"{comp}_on_{k}")
-                with col2:
+                with col2:  # Surge end time (days)
                     t_off = st.number_input(f"{label} surge {k + 1} end",
                         min_value=t_on, max_value=150.0, value=t_on + 5.0, step=1.0, key=f"{comp}_off_{k}")
-                with col3:
+                with col3:  # Surge amplitude (extra admissions per day)
                     amp = st.number_input(
                         f"{label} surge {k + 1}: extra admissions per day", min_value=0.0, max_value=50.0, value=1.0, step=1.0,
                         help="Total direct admissions during surge", key=f"{comp}_amp_{k}")
 
-                surge_specs[comp].append((t_on, t_off, amp))
-
-
+                surge_specs[comp].append((t_on, t_off, amp))   # Store surge event
+    # Stop execution if no surge events are defined across all units
     if all(len(v) == 0 for v in surge_specs.values()):
         st.warning("No surge events defined.")
         st.stop()
 
-
+    # --------------------------------------------------------------------
+    # Determine simulation horizon:
+    # take the latest surge end time across all units and extend it by 70 days to allow the system to relax back to equilibrium
     t_end = max(w[1] for comp in surge_specs.values() for w in comp) + 70
-    times = np.arange(0, t_end + dt, dt)
+    times = np.arange(0, t_end + dt, dt) # Time grid for simulation (daily resolution)
 
+    # Compute transient system response to multiple surge events
     res = transient_response_for_multi_surge(surge_specs, times)
 
-    x_ts = res['x_ts']
-    x0 = res['x0']
+    x_ts = res['x_ts'] # Time series of state variables (beds by unit)
+    x0 = res['x0']     # Baseline equilibrium (no-surge steady state)
 
-    extra_beds_over_time = x_ts - x0
-    ####
-    threshold = 0.1  # beds
-    # max across compartments at each time
-    max_extra = np.max(extra_beds_over_time, axis=1)
-    # indices where system is still meaningfully away from equilibrium
-    active_idx = np.where(max_extra >= threshold)[0]
+    extra_beds_over_time = x_ts - x0 # Compute daily excess bed occupancy relative to baseline
+
+    # We define "active surge impact" as any time when at least one unit
+    # exceeds the baseline by more than the specified threshold.
+    threshold = 0.1  # minimum extra beds considered meaningful
+
+    max_extra = np.max(extra_beds_over_time, axis=1) # Maximum excess occupancy across units at each time point
+
+    active_idx = np.where(max_extra >= threshold)[0] # Indices where the system is still above the threshold
+
+    # Last time index with meaningful surge impact
     if len(active_idx) > 0:
         t_cut = active_idx[-1] + 1
     else:
-        t_cut = 1  # nothing meaningful happened
+        t_cut = 1   # No meaningful deviation from equilibrium detected
+
+    # --------------------------------------------------------------------
+    # Truncate the time series to exclude periods where excess occupancy is negligible (< threshold).
+    # All downstream workload and cost calculations are based on this truncated series.
     times_plot = times[:t_cut]
     x_ts_plot= x_ts[:t_cut]
 
-    ###
+    # Plot transient bed occupancy by unit, together with the baseline (no-surge) equilibrium level for reference.
+    # fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
+    # colors = ['blue', 'green', 'purple']; labels = ['Hs', 'Hm', 'ICU']
+    # for i in range(3):
+    #     fig.add_trace(go.Scatter( x=times_plot, y=x_ts_plot[:, i],  mode='lines', name=f"{labels[i]} occupancy", line=dict(color=colors[i]) ), row=i + 1, col=1 )
+    #     fig.add_hline(y=x0[i], line_dash="dot",line_color=colors[i], row=i + 1, col=1 )
+    # fig.update_xaxes(title_text="Days", row=3, col=1)
+    # fig.update_layout( title="Transient Bed Occupancy Under Surge Scenarios", yaxis_title="Beds",  template="plotly_white", height=500 )
+    # st.plotly_chart(fig, use_container_width=True)
 
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
+    #########
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        specs=[[{"secondary_y": True}],
+               [{"secondary_y": True}],
+               [{"secondary_y": True}]]
+    )
+
     colors = ['blue', 'green', 'purple']
     labels = ['Hs', 'Hm', 'ICU']
 
+    extra_beds = x_ts - x0  # extra beds relative to equilibrium
+    extra_beds_plot= extra_beds[:t_cut]
     for i in range(3):
-        fig.add_trace(go.Scatter( x=times_plot, y=x_ts_plot[:, i],  mode='lines', name=f"{labels[i]} occupancy", line=dict(color=colors[i]) ), row=i + 1, col=1 )
-        fig.add_hline(y=x0[i], line_dash="dot",line_color=colors[i], row=i + 1, col=1 )
+        # --- absolute occupancy (left axis) ---
+        fig.add_trace(go.Scatter(x=times_plot, y=x_ts_plot[:, i], mode="lines", name=f"{labels[i]} occupancy",
+                line=dict(color=colors[i])), row=i + 1, col=1,  secondary_y=False )
 
+        # equilibrium line
+        fig.add_hline( y=x0[i], line_dash="dot", line_color=colors[i],  row=i + 1, col=1 )
+
+        # --- extra beds (right axis, starts at 0) ---
+        fig.add_trace( go.Scatter(x=times_plot, y=extra_beds_plot[:, i], mode="lines",
+                name=f"{labels[i]} extra beds",line=dict(color=colors[i], dash="dash"), visible="legendonly",
+                showlegend=False ), row=i + 1,col=1, secondary_y=True)
+
+        # --- Extra beds (bars = discrete daily beds) ---
+        fig.add_trace(go.Bar( x=times_plot,
+                y=extra_beds_plot[:, i],
+                name=f"{labels[i]} extra beds (daily)",
+                marker_color=colors[i],
+                opacity=0.35,
+                showlegend=False
+            ),
+            row=i + 1, col=1, secondary_y=True
+        )
+
+        # right axis formatting
+        fig.update_yaxes( title_text="Extra beds", secondary_y=True,
+            row=i + 1, col=1,rangemode="tozero" )
+
+
+
+    # axis labels
     fig.update_xaxes(title_text="Days", row=3, col=1)
-    fig.update_layout( title="Transient Bed Occupancy Under Surge Scenarios", yaxis_title="Beds",  template="plotly_white", height=500 )
+    fig.update_yaxes(title_text="Beds", secondary_y=False)
+    fig.update_layout(
+        title="Transient Bed Occupancy Under Surge Scenarios",
+        template="plotly_white",
+        height=600,
+        legend=dict(orientation="h", y=-0.15))
+
     st.plotly_chart(fig, use_container_width=True)
 
-    #extra_beddays_per_comps= res['extra_beddays_per_comp']
+    ########
+
+    # --------------------------------------------------------------------
+    # Compute peak excess bed demand:
+    #  total peak across all units,  unit-specific peaks for capacity planning
+
     peak_extra_beds_total = np.max(np.sum(extra_beds_over_time, axis=1))
     peak_extra_beds_per_comp = {
         'Hs': np.max(extra_beds_over_time[:, 0]),
         'Hm': np.max(extra_beds_over_time[:, 1]),
-        'I': np.max(extra_beds_over_time[:, 2])
-    }
-    # total_beds_needed = {
-    #     'Hs': x0[0] + peak_extra_beds_per_comp['Hs'],
-    #     'Hm': x0[1] + peak_extra_beds_per_comp['Hm'],
-    #     'I': x0[2] + peak_extra_beds_per_comp['I'],
-    #     'Total': np.sum(x0) + peak_extra_beds_total}
+        'I': np.max(extra_beds_over_time[:, 2]) }
 
-    # --- Output numbers ---
+    # --- Output summary statistics ---
     col1, col2 = st.columns(2)
 
     with col1:
@@ -215,9 +275,7 @@ else : #mode=="Transient surge":
     with col2:
         st.write("### 📊 Cumulative Bed-Days (Total Workload)")
         extra_beds_cut = extra_beds_over_time[:t_cut]
-        extra_beddays_per_comp_cut = {
-            comp: extra_beds_cut[:, j].sum()
-            for j, comp in enumerate(["Hs", "Hm", "I"])}
+        extra_beddays_per_comp_cut = {comp: extra_beds_cut[:, j].sum() for j, comp in enumerate(["Hs", "Hm", "I"])}
         extra_beddays_total_cut = sum(extra_beddays_per_comp_cut.values())
         #### look here
         res["extra_beddays_per_comp_cut"] = extra_beddays_per_comp_cut
@@ -227,6 +285,7 @@ else : #mode=="Transient surge":
         st.write("**By compartment:**")
         for comp, beddays in res["extra_beddays_per_comp_cut"].items():
             st.write(f"- {comp}: {beddays:.1f} bed-days")
+
 
     st.write("### 🗓️ Weekly Bed-Day Workload")
     st.caption("Weekly aggregation of extra occupied beds (bed-days)")
@@ -240,8 +299,7 @@ else : #mode=="Transient surge":
     extra_padded = np.pad(extra_beds_over_time_cut,((0, pad), (0, 0)), mode="constant")
 
     weeks_workload = extra_padded.reshape(n_weeks, 7, n_units).sum(axis=1)
-    week_labels = [f"Week {i + 1}" for i in range(n_weeks)]
-    unit_labels = ["Hs", "Hm", "ICU"]
+    week_labels = [f"Week {i + 1}" for i in range(n_weeks)]; unit_labels = ["Hs", "Hm", "ICU"]
 
     df_weeks = pd.DataFrame( weeks_workload,index=week_labels,columns=unit_labels )
 
@@ -461,10 +519,9 @@ else : #mode=="Transient surge":
         df_cost_weeks_all["Total"] += df_resource_cost_weeks["Total"]
 
 
-        st.dataframe(
-            df_cost_weeks_all.style.format("${:,.0f}"),
-            use_container_width=True
-        )
+        st.dataframe( df_cost_weeks_all.style.format("${:,.0f}"))
+
+
 
         ##########
 
