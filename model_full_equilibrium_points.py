@@ -4,7 +4,6 @@ import numpy as np
 from scipy.linalg import expm
 import matplotlib.pyplot as plt
 from scipy.linalg import expm
-
 from scipy.linalg import expm
 import numpy as np
 from copy import deepcopy
@@ -127,119 +126,6 @@ def jacobian_at_equilibrium(fixed_params):
 
 
 
-def transient_response_for_surge(ad_hs, ad_hm, ad_icu, T_surge=14, dt=0.5):
-    equilibrium = compute_equilibrium_data(fixed_params, arrivals_mean, Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean,
-                                           At_Hs_mean, At_Hm_mean, At_ICU_mean)
-
-    # baseline downstream equilibrium vector x0 (Hs,Hm,I)
-    x0 = np.array([equilibrium['Hs'], equilibrium['Hm'], equilibrium['I']], dtype=float)
-
-    xs = compute_equilibrium_data(fixed_params, arrivals_mean, ad_hs, ad_hm, ad_icu,
-                                           At_Hs_mean, At_Hm_mean, At_ICU_mean)
-    x_step =  np.array([xs['Hs'], xs['Hm'], xs['I']])
-    J_full, eigvals = jacobian_at_equilibrium(fixed_params)
-    J = J_full[:3, :3]
-
-    # Precompute matrix exponential function for multiples of dt
-    times = np.arange(0, T_surge + 80, dt)  # simulate some relaxation after surge
-    x_ts = np.zeros((len(times), 3))
-    # initial state is baseline equilibrium
-    x_ts[0,:] = x0.copy()
-    delta_eq = x_step - x0
-    for k, t in enumerate(times):
-        if t <= T_surge:
-            y_t = (np.eye(3) - expm(J*t)).dot(delta_eq)
-            x_ts[k,:] = x0 + y_t
-        else:
-            # After step-off at T_surge, system returns towards baseline: treat as a new initial condition
-            # At t=T_surge state is x(T_surge); for t > T_surge the forcing is removed, so homogeneous solution:
-            x_Ts = x0 + (np.eye(3) - expm(J*T_surge)).dot(delta_eq)
-            # for time tau = t - T_surge:
-            tau = t - T_surge
-            x_ts[k,:] = x0 + expm(J*tau).dot(x_Ts - x0)
-
-    # compute cumulative extra bed-days during [0, times[-1]]: integrate (x(t)-x0)
-    dt_arr = np.diff(times, prepend=0)
-    extra_beddays = np.trapz(np.sum(x_ts - x0, axis=1), times)  # total extra bed-days across all 3 comps
-    extra_beddays_per_comp = { 'Hs': np.trapz(x_ts[:,0]-x0[0], times),
-                               'Hm': np.trapz(x_ts[:,1]-x0[1], times),
-                               'I' : np.trapz(x_ts[:,2]-x0[2], times) }
-
-    # Pack results
-    ts_results = {'times': times, 'x_ts': x_ts, 'x0': x0, 'x_step': x_step,
-                  'extra_beddays_total': extra_beddays,
-                  'extra_beddays_per_comp': extra_beddays_per_comp,
-                  'eigvals': eigvals}
-    return ts_results
-
-
-
-
-
-T_surge=5
-def ed_ode(y, t, params):
-    W, S, B_Hs, B_Hm, B_I, Hs, Hm, I, D = y
-    if t <= T_surge:
-        ad_hs, ad_hm, ad_icu = params
-    else:
-        ad_hs, ad_hm, ad_icu = Ad_Hs_mean, Ad_Hm_mean,  Ad_ICU_mean
-
-
-    sigma = fixed_params['sigma']
-    omega = fixed_params['omega']
-
-    pED_Hs = fixed_params['pED_Hs']
-    pED_Hm = fixed_params['pED_Hm']
-    pED_ICU = fixed_params['pED_ICU']
-
-    xi_I = fixed_params['xi_I']
-    xi_Hs = fixed_params['xi_Hs']
-    xi_Hm = fixed_params['xi_Hm']
-
-    varphi_I = fixed_params['varphi_I']
-    varphi_D = fixed_params['varphi_D'] #0.25
-    varphi_Hm = fixed_params['varphi_Hm']
-    eps_Hs = fixed_params['eps_Hs']
-
-    ###############################
-    gamma = fixed_params['gamma']
-    eps_Hm = fixed_params['eps_Hm']
-    psi_D = fixed_params['psi_D']
-    psi_I = fixed_params['psi_I']
-    eps_D = fixed_params['eps_D']
-    # Prevent negative values
-    lam = arrivals_mean
-    dW = lam - (sigma + omega) * W
-    dS = sigma * W - gamma * S
-
-    dB_Hs = pED_Hs * gamma * S - xi_Hs * B_Hs
-    dB_Hm = pED_Hm * gamma * S - xi_Hm * B_Hm
-    dB_I = pED_ICU * gamma* S - xi_I * B_I
-
-    Admissions_Hs = xi_Hs * B_Hs + ad_hs +  At_Hs_mean
-    Admissions_Hm = xi_Hm * B_Hm + ad_hm +  At_Hm_mean
-    Admissions_ICU = xi_I * B_I +  ad_icu +  At_ICU_mean
-
-    dHs = Admissions_Hs + eps_Hs * I - (varphi_I + varphi_D + varphi_Hm) * Hs
-    dHm = Admissions_Hm + eps_Hm * I + varphi_Hm * Hs - (psi_D + psi_I) * Hm
-    dI = Admissions_ICU + varphi_I * Hs + psi_I * Hm - (eps_Hs + eps_Hm + eps_D) * I
-    dD = varphi_D * Hs + psi_D * Hm + eps_D * I
-
-    return [dW, dS, dB_Hs, dB_Hm, dB_I, dHs, dHm, dI, dD]
-
-
-
-
-############################
-surge_windows = {
-    'Hs': [(3, 7)],
-    'Hm': [(1, 5), (10, 20)],
-    'I' : [(3, 4)]
-}
-
-def is_in_any_window(t, windows):
-    return any(t0 <= t <= t1 for (t0, t1) in windows)
-
 def active_surge_amplitude(t, windows, baseline):
     """
     Returns surge amplitude if t is in any window,
@@ -253,7 +139,7 @@ def active_surge_amplitude(t, windows, baseline):
     return amp
 
 
-def ed_ode2(y, t, surge_specs):
+def ed_ode(y, t, surge_specs):
     W, S, B_Hs, B_Hm, B_I, Hs, Hm, I, D = y
 
     # Time-dependent admissions
@@ -381,58 +267,34 @@ if __name__ == '__main__':
     #    Each tuple = (start_day, end_day, amplitude)
     # --------------------------------------------------
     surge_specs1 = {
-        'Hs': [
-            (3, 7,  2),
-            (8, 10, 5)
-        ],
-        'Hm': [
-            (1, 10,  2),
-            (5, 20, 1)
-        ],
-        'I': [ (3, 4,  1) ]
-    }
+        'Hs': [ (3, 7,  2), (8, 10, 5) ],
+        'Hm': [ (1, 10,  2), (5, 20, 1) ],
+        'I': [ (3, 4,  1) ]}
     surge_specs = {
-        'Hs': [
-            (3, 7,  2 + Ad_Hs_mean),
-            (8, 10, 5 + Ad_Hs_mean)
-        ],
-        'Hm': [
-            (1, 10,   2 + Ad_Hm_mean),
-            (5, 20, 1+ Ad_Hm_mean)
-        ],
-        'I': [(3, 4, 1 + Ad_ICU_mean)]
-    }
+        'Hs': [ (3, 7,  2 + Ad_Hs_mean), (8, 10, 5 + Ad_Hs_mean)],
+        'Hm': [(1, 10,   2 + Ad_Hm_mean),(5, 20, 1+ Ad_Hm_mean)],
+        'I': [(3, 4, 1 + Ad_ICU_mean)]}
 
     # --------------------------------------------------
     # 2) Time grid (SHARED by ODE and analytic solution)
     # --------------------------------------------------
-    dt = 0.5
+    dt = 1
     t_end = max(w[1] for comp in surge_specs.values() for w in comp) + 80
     times = np.arange(0, t_end + dt, dt)
 
     # --------------------------------------------------
     # 3) Initial condition from equilibrium
     # --------------------------------------------------
-    y0_dict = compute_equilibrium_data(
-        fixed_params, arrivals_mean,
+    y0_dict = compute_equilibrium_data(fixed_params, arrivals_mean,
         Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean,
-        At_Hs_mean, At_Hm_mean, At_ICU_mean
-    )
+        At_Hs_mean, At_Hm_mean, At_ICU_mean)
     y0 = np.array(list(y0_dict.values()))
 
     # --------------------------------------------------
     # 4) Solve FULL NONLINEAR ODE
     # --------------------------------------------------
-    mu = odeint(
-        ed_ode2,
-        y0,
-        times,
-        args=(surge_specs,),
-        rtol=1e-6,
-        atol=1e-6,
-        mxstep=5000
-    )
-
+    mu = odeint(ed_ode, y0, times, args=(surge_specs,),
+        rtol=1e-6, atol=1e-6, mxstep=5000 )
     mu_Hs = mu[:, 5]
     mu_Hm = mu[:, 6]
     mu_I  = mu[:, 7]
@@ -465,4 +327,49 @@ if __name__ == '__main__':
     plt.show()
 
 
+
+# def transient_response_for_surge(ad_hs, ad_hm, ad_icu, T_surge=14, dt=1):
+#     equilibrium = compute_equilibrium_data(fixed_params, arrivals_mean, Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean,
+#                                            At_Hs_mean, At_Hm_mean, At_ICU_mean)
+#
+#     # baseline downstream equilibrium vector x0 (Hs,Hm,I)
+#     x0 = np.array([equilibrium['Hs'], equilibrium['Hm'], equilibrium['I']], dtype=float)
+#     xs = compute_equilibrium_data(fixed_params, arrivals_mean, ad_hs, ad_hm, ad_icu,
+#                                            At_Hs_mean, At_Hm_mean, At_ICU_mean)
+#     x_step =  np.array([xs['Hs'], xs['Hm'], xs['I']])
+#     J_full, eigvals = jacobian_at_equilibrium(fixed_params)
+#     J = J_full[:3, :3]
+#
+#     # Precompute matrix exponential function for multiples of dt
+#     times = np.arange(0, T_surge + 80, dt)  # simulate some relaxation after surge
+#     x_ts = np.zeros((len(times), 3))
+#     # initial state is baseline equilibrium
+#     x_ts[0,:] = x0.copy()
+#     delta_eq = x_step - x0
+#     for k, t in enumerate(times):
+#         if t <= T_surge:
+#             y_t = (np.eye(3) - expm(J*t)).dot(delta_eq)
+#             x_ts[k,:] = x0 + y_t
+#         else:
+#             x_Ts = x0 + (np.eye(3) - expm(J*T_surge)).dot(delta_eq)
+#             tau = t - T_surge
+#             x_ts[k,:] = x0 + expm(J*tau).dot(x_Ts - x0)
+#
+#     # compute cumulative extra bed-days during [0, times[-1]]: integrate (x(t)-x0)
+#     dt_arr = np.diff(times, prepend=0)
+#     extra_beddays = np.trapz(np.sum(x_ts - x0, axis=1), times)  # total extra bed-days across all 3 comps
+#     extra_beddays_per_comp = { 'Hs': np.trapz(x_ts[:,0]-x0[0], times),
+#                                'Hm': np.trapz(x_ts[:,1]-x0[1], times),
+#                                'I' : np.trapz(x_ts[:,2]-x0[2], times) }
+#
+#     # Pack results
+#     ts_results = {'times': times, 'x_ts': x_ts, 'x0': x0, 'x_step': x_step,
+#                   'extra_beddays_total': extra_beddays,
+#                   'extra_beddays_per_comp': extra_beddays_per_comp,
+#                   'eigvals': eigvals}
+#     return ts_results
+
+#
+# def is_in_any_window(t, windows):
+#     return any(t0 <= t <= t1 for (t0, t1) in windows)
 

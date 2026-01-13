@@ -12,8 +12,7 @@ from matplotlib.colors import TwoSlopeNorm
 # NOTE: Replace the following two lines by the actual import that gives you `df`, `fixed_params`, and the functions.
 from model_full_equilibrium_points import (
     procces_data, compute_params_from_df, compute_equilibrium_data,transient_response_for_multi_surge,
-     transient_response_for_surge,fixed_params, jacobian_at_equilibrium, Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean, df
-)
+     fixed_params, jacobian_at_equilibrium, Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean, df)
 # ---- END initialization/import ----
 
 plt.rcParams.update({'font.size': 18,        # general font size
@@ -21,13 +20,12 @@ plt.rcParams.update({'font.size': 18,        # general font size
     'axes.titlesize': 22,   # title size
     'xtick.labelsize': 20,  # x tick labels
     'ytick.labelsize': 20,  # y tick labels
-    'legend.fontsize': 22  # legend text
-})
+    'legend.fontsize': 22 })
 
 
 st.set_page_config(page_title="Hospital Equilibrium Explorer", layout="wide")
 
-st.title("Hospital Equilibrium Explorer")
+
 
 # --- load data & fixed params (should be fast; we assume procces_data is deterministic) ---
 # init_day='2024-01-01'
@@ -38,22 +36,26 @@ def load_data(init_day, end_day):
     return df, fixed_params
 
 # Sidebar controls for selecting mode
-st.sidebar.header("Controls")
-mode = st.sidebar.radio("Choose view", ["Equilibrium", "Transient surge", "Elasticity heatmap"])
+st.sidebar.header("🔧 Analysis Mode")
+mode = st.sidebar.radio("Select analysis view", ["Equilibrium", "Transient surge"])
 
 # ---------- EQUILIBRIUM PAGE ----------
 if mode == "Equilibrium":
-    st.header("Baseline equilibrium and observed data")
+    st.header("🏥 Hospital Capacity & Surge Planning Explorer")
+    st.markdown("Model-based analysis of baseline equilibrium, surge scenarios, workload, and resource planning" )
+
+    st.markdown("#### Baseline Equilibrium Analysis")
     st.markdown("Baseline equilibrium computed from weekly means of arrivals/admissions and fixed parameters.")
 
-    date_range = st.slider( "Select date range",
-        min_value=dt.date(2020, 1, 1),
-        max_value=dt.date(2025, 3, 31),
-        value=(dt.date(2020, 1, 1), dt.date(2025, 3, 31)),
-        format="YYYY-MM-DD")
+    #st.markdown("📅 Analysis Period")
+    date_range = st.slider( "Select date range for baseline estimation", min_value=dt.date(2020, 1, 1),  max_value=dt.date(2025, 3, 31),
+        value=(dt.date(2020, 1, 1), dt.date(2025, 3, 31)), format="YYYY-MM-DD")
+
     init_day, end_day = date_range
     init_day_str = init_day.strftime("%Y-%m-%d")
     end_day_str = end_day.strftime("%Y-%m-%d")
+
+
 
     df, fixed_params = load_data(init_day_str, end_day_str)
 
@@ -94,6 +96,8 @@ if mode == "Equilibrium":
     cap_IP_surge = int((df['TTL_BEDS_IP_SURGE'] - df['UNAVBL_BEDS_IP_SURGE']).median())
     #st.subheader("Observed occupancy time series with equilibrium lines")
     ################
+
+    #st.subheader("📈 Observed Occupancy vs. Equilibrium")
     dates = df['Date']
     fig = plot_occupancy(df, baseline_eq, cap_IP_surge, cap_med_surg, cap_ICU, init_day_str, end_day_str)
     st.plotly_chart(fig, use_container_width=True)
@@ -102,20 +106,20 @@ if mode == "Equilibrium":
     st.plotly_chart(fig, use_container_width=True)
 
     # Update layout
-    st.subheader("Equilibrium values")
+    #st.subheader("⚖️ Equilibrium Occupancy Levels")
+    st.markdown("#### Equilibrium Occupancy Levels")
     eq_table = pd.DataFrame({ "compartment": list(baseline_eq.keys()), "value": [baseline_eq[k] for k in baseline_eq.keys()] })
     st.dataframe(eq_table.style.format({"value": "{:.2f}"}), height=300)
 
 
 
 # ---------- SURGE SWEEP PAGE ----------
-elif mode=="Transient surge":
-
-    st.subheader("📈 Surge Scenarios")
+else : #mode=="Transient surge":
+    st.subheader("📈 Surge Scenarios Analysis")
+    st.markdown("Specify the timing, duration, and intensity of admission surges by unit." )
     surge_specs = {'Hs': [], 'Hm': [], 'I': []}
 
-    dt = 0.5
-
+    dt = 1.0
     for comp, label, base in [
         ('Hs', 'IP (Hs)', Ad_Hs_mean),
         ('Hm', 'Medical (Hm)', Ad_Hm_mean),
@@ -142,9 +146,11 @@ elif mode=="Transient surge":
 
                 surge_specs[comp].append((t_on, t_off, amp))
 
+
     if all(len(v) == 0 for v in surge_specs.values()):
         st.warning("No surge events defined.")
         st.stop()
+
 
     t_end = max(w[1] for comp in surge_specs.values() for w in comp) + 70
     times = np.arange(0, t_end + dt, dt)
@@ -154,27 +160,34 @@ elif mode=="Transient surge":
     x_ts = res['x_ts']
     x0 = res['x0']
 
+    extra_beds_over_time = x_ts - x0
+    ####
+    threshold = 0.1  # beds
+    # max across compartments at each time
+    max_extra = np.max(extra_beds_over_time, axis=1)
+    # indices where system is still meaningfully away from equilibrium
+    active_idx = np.where(max_extra >= threshold)[0]
+    if len(active_idx) > 0:
+        t_cut = active_idx[-1] + 1
+    else:
+        t_cut = 1  # nothing meaningful happened
+    times_plot = times[:t_cut]
+    x_ts_plot= x_ts[:t_cut]
+
+    ###
 
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True)
     colors = ['blue', 'green', 'purple']
     labels = ['Hs', 'Hm', 'ICU']
 
     for i in range(3):
-        fig.add_trace(go.Scatter( x=times, y=x_ts[:, i],  mode='lines', name=f"{labels[i]} occupancy",
-                line=dict(color=colors[i]) ), row=i + 1, col=1 )
-
+        fig.add_trace(go.Scatter( x=times_plot, y=x_ts_plot[:, i],  mode='lines', name=f"{labels[i]} occupancy", line=dict(color=colors[i]) ), row=i + 1, col=1 )
         fig.add_hline(y=x0[i], line_dash="dot",line_color=colors[i], row=i + 1, col=1 )
 
     fig.update_xaxes(title_text="Days", row=3, col=1)
-    fig.update_layout(
-        title="Transient occupancy under multiple surge scenarios",
-        yaxis_title="Beds",
-        template="plotly_white",
-        height=500 )
-
+    fig.update_layout( title="Transient Bed Occupancy Under Surge Scenarios", yaxis_title="Beds",  template="plotly_white", height=500 )
     st.plotly_chart(fig, use_container_width=True)
 
-    extra_beds_over_time = x_ts - x0
     #extra_beddays_per_comps= res['extra_beddays_per_comp']
     peak_extra_beds_total = np.max(np.sum(extra_beds_over_time, axis=1))
     peak_extra_beds_per_comp = {
@@ -182,18 +195,17 @@ elif mode=="Transient surge":
         'Hm': np.max(extra_beds_over_time[:, 1]),
         'I': np.max(extra_beds_over_time[:, 2])
     }
-    total_beds_needed = {
-        'Hs': x0[0] + peak_extra_beds_per_comp['Hs'],
-        'Hm': x0[1] + peak_extra_beds_per_comp['Hm'],
-        'I': x0[2] + peak_extra_beds_per_comp['I'],
-        'Total': np.sum(x0) + peak_extra_beds_total
-    }
+    # total_beds_needed = {
+    #     'Hs': x0[0] + peak_extra_beds_per_comp['Hs'],
+    #     'Hm': x0[1] + peak_extra_beds_per_comp['Hm'],
+    #     'I': x0[2] + peak_extra_beds_per_comp['I'],
+    #     'Total': np.sum(x0) + peak_extra_beds_total}
 
     # --- Output numbers ---
     col1, col2 = st.columns(2)
 
     with col1:
-        st.write("### 🏥 Peak Bed Requirements")
+        st.write("### 🏥 Peak Additional Bed Requirements")
         st.metric("Total Extra Beds", f"{peak_extra_beds_total:.1f}")
         st.write("**By compartment:**")
         st.write(f"- Hs: {peak_extra_beds_per_comp['Hs']:.1f} extra")
@@ -201,16 +213,50 @@ elif mode=="Transient surge":
         st.write(f"- ICU: {peak_extra_beds_per_comp['I']:.1f} extra")
 
     with col2:
-        st.write("### 📊 Total Workload")
-        st.metric("Extra Bed-Days (Total)", f"{res['extra_beddays_total']:.1f}")
+        st.write("### 📊 Cumulative Bed-Days (Total Workload)")
+        extra_beds_cut = extra_beds_over_time[:t_cut]
+        extra_beddays_per_comp_cut = {
+            comp: extra_beds_cut[:, j].sum()
+            for j, comp in enumerate(["Hs", "Hm", "I"])}
+        extra_beddays_total_cut = sum(extra_beddays_per_comp_cut.values())
+        #### look here
+        res["extra_beddays_per_comp_cut"] = extra_beddays_per_comp_cut
+        res["extra_beddays_total_cut"] = extra_beddays_total_cut
+
+        st.metric("Extra Bed-Days (Total)", f"{res["extra_beddays_total_cut"]:.1f}")
         st.write("**By compartment:**")
-        for comp, beddays in res['extra_beddays_per_comp'].items():
+        for comp, beddays in res["extra_beddays_per_comp_cut"].items():
             st.write(f"- {comp}: {beddays:.1f} bed-days")
 
-    st.write("### 👥 Staffing & Resource Planning")
+    st.write("### 🗓️ Weekly Bed-Day Workload")
+    st.caption("Weekly aggregation of extra occupied beds (bed-days)")
 
-    # Use different variable names for each set of columns
-    st.write("#### IP Surge (Hs) ")
+    extra_beds_over_time_cut = x_ts[:t_cut] - x0
+    n_days, n_units = extra_beds_over_time_cut.shape
+    n_weeks = int(np.ceil(n_days / 7))
+
+    # pad with zeros so days is a multiple of 7
+    pad = n_weeks * 7 - n_days
+    extra_padded = np.pad(extra_beds_over_time_cut,((0, pad), (0, 0)), mode="constant")
+
+    weeks_workload = extra_padded.reshape(n_weeks, 7, n_units).sum(axis=1)
+    week_labels = [f"Week {i + 1}" for i in range(n_weeks)]
+    unit_labels = ["Hs", "Hm", "ICU"]
+
+    df_weeks = pd.DataFrame( weeks_workload,index=week_labels,columns=unit_labels )
+
+    # total per week (row-wise)
+    df_weeks["Total"] = df_weeks.sum(axis=1)
+    df_weeks.loc["Total"] = df_weeks.sum(axis=0)
+
+    st.dataframe(df_weeks)
+
+    ############
+    st.write("### 👥 Staffing & Resource Planning")
+    st.caption("Estimate staffing needs and operational costs based on cumulative bed-day demand")
+
+    st.write("#### Nursing Assumptions by Unit")
+    st.write("##### IP Surge (Hs) ")
     hs_col1, hs_col2, hs_col3 = st.columns(3)
     with hs_col1:
         beds_per_nurse_Hs = st.number_input("Beds per nurse",  min_value=1.0, max_value=10.0, value=4.0, step=0.5,
@@ -218,34 +264,33 @@ elif mode=="Transient surge":
         nurses_per_bed_Hs = 1.0 / beds_per_nurse_Hs
 
     with hs_col2:
-        cost_per_bedday_Hs = st.number_input("Cost per bed-day ($)", min_value=100, max_value=2000, value=800, step=50,
+        cost_per_bedday_Hs = st.number_input("Cost per day ($)", min_value=100, max_value=2000, value=800, step=50,
                                              help="Includes staff, supplies, utilities", key="cost_hs")
     with hs_col3:
         shifts_per_day_Hs = st.number_input("Shifts per day", min_value=1, max_value=3, value=2, step=1,
                                             help="Typically 2-3 shifts per day", key="shifts_hs")
 
-    st.write("#### Med Surge Tele (Hm) ")
+    st.write("##### Med Surge Tele (Hm) ")
     hm_col1, hm_col2, hm_col3 = st.columns(3)
     with hm_col1:
         beds_per_nurse_Hm = st.number_input( "Beds per nurse", min_value=1.0, max_value=10.0, value=5.0, step=0.5,
             help="Typical: 4–6 beds per nurse", key="beds_per_nurse_hm" )
         nurses_per_bed_Hm = 1 / beds_per_nurse_Hm
-
     with hm_col2:
-        cost_per_bedday_Hm = st.number_input("Cost per bed-day ($)", min_value=100, max_value=2000, value=800, step=50,
+        cost_per_bedday_Hm = st.number_input("Cost per bed ($)", min_value=100, max_value=2000, value=800, step=50,
                                              help="Includes staff, supplies, utilities", key="cost_hm")
     with hm_col3:
         shifts_per_day_Hm = st.number_input("Shifts per day", min_value=1, max_value=3, value=2, step=1,
                                             help="Typically 2-3 shifts per day", key="shifts_hm")
 
-    st.write("#### ICU ")
+    st.write("##### ICU ")
     icu_col1, icu_col2, icu_col3 = st.columns(3)
     with icu_col1:
         beds_per_nurse_ICU = st.number_input( "Beds per nurse", min_value=1.0, max_value=4.0, value=2.0, step=0.5,
             help="Typical ICU ratio: 1–2 beds per nurse", key="beds_per_nurse_icu")
         nurses_per_bed_ICU = 1/beds_per_nurse_ICU
     with icu_col2:
-        cost_per_bedday_ICU = st.number_input("Cost per bed-day ($)", min_value=100, max_value=2000, value=800, step=50,
+        cost_per_bedday_ICU = st.number_input("Cost per day ($)", min_value=100, max_value=2000, value=800, step=50,
                                               help="Includes staff, supplies, utilities", key="cost_icu")
     with icu_col3:
         shifts_per_day_ICU = st.number_input("Shifts per day", min_value=1, max_value=3, value=2, step=1,
@@ -255,7 +300,8 @@ elif mode=="Transient surge":
     if "resources" not in st.session_state:
         st.session_state.resources = []
 
-    st.markdown("### ➕ Add Staffing / Resource Type")
+    st.markdown("#### ➕ Add Staffing / Resource Type")
+    st.caption("Optional resources beyond nursing (e.g., respiratory therapy, technicians). ")
 
     with st.form("add_resource_form", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
@@ -274,7 +320,7 @@ elif mode=="Transient surge":
 
         col4, col5 = st.columns(2)
         with col4:
-            cost_per_shift = st.number_input("Cost per shift ($)", min_value=0.0, value=400.0, step=50.0)
+            cost_per_day = st.number_input("Cost per day-bed ($)", min_value=0.0, value=400.0, step=50.0)
 
         with col5:
             shifts_per_day = st.number_input("Shifts per day", min_value=1, max_value=3, value=2)
@@ -286,11 +332,11 @@ elif mode=="Transient surge":
                 "name": res_name,
                 "unit": res_unit,
                 "staff_per_bed": staff_per_bed,
-                "cost_per_shift": cost_per_shift,
+                "cost_per_bed-day": cost_per_day,
                 "shifts_per_day": shifts_per_day
             })
 
-    st.markdown("### 📋 Added Resources")
+    st.markdown("##### 📋 Added Resources")
 
     if len(st.session_state.resources) == 0:
         st.info("No additional resources added yet.")
@@ -301,8 +347,9 @@ elif mode=="Transient surge":
             col1.write(f"**{r['name']}**")
             col2.write(f"Unit: {r['unit']}")
             col3.write(f"{r['staff_per_bed']} / bed")
-            col4.write(f"${r['cost_per_shift']} / shift")
+            col4.write(f"${r['cost_per_bed-day']} / bed")
 
+            # check here
             if col5.button("❌", key=f"del_{i}"):
                 st.session_state.resources.pop(i)
                 st.experimental_rerun()
@@ -311,17 +358,19 @@ elif mode=="Transient surge":
 
     if st.button("Calculate Staffing Needs"):
         # CORRECTED: Use the per-component dictionary, not the total
-        extra_nurse_shifts_Hs = res['extra_beddays_per_comp']['Hs'] * nurses_per_bed_Hs * shifts_per_day_Hs
-        total_cost_Hs = res['extra_beddays_per_comp']['Hs'] * cost_per_bedday_Hs
+        #extra_beddays_per_comp_cut
+        extra_nurse_shifts_Hs = res['extra_beddays_per_comp_cut']['Hs'] * nurses_per_bed_Hs * shifts_per_day_Hs
+        total_cost_Hs = res['extra_beddays_per_comp_cut']['Hs']* nurses_per_bed_Hs * cost_per_bedday_Hs
 
-        extra_nurse_shifts_Hm = res['extra_beddays_per_comp']['Hm'] * nurses_per_bed_Hm * shifts_per_day_Hm
-        total_cost_Hm = res['extra_beddays_per_comp']['Hm'] * cost_per_bedday_Hm
+        extra_nurse_shifts_Hm = res['extra_beddays_per_comp_cut']['Hm'] * nurses_per_bed_Hm * shifts_per_day_Hm
+        total_cost_Hm = res['extra_beddays_per_comp_cut']['Hm'] * nurses_per_bed_Hm * cost_per_bedday_Hm
 
-        extra_nurse_shifts_ICU = res['extra_beddays_per_comp']['I'] * nurses_per_bed_ICU * shifts_per_day_ICU
-        total_cost_ICU = res['extra_beddays_per_comp']['I'] * cost_per_bedday_ICU
+        extra_nurse_shifts_ICU = res['extra_beddays_per_comp_cut']['I'] * nurses_per_bed_ICU * shifts_per_day_ICU
+        total_cost_ICU = res['extra_beddays_per_comp_cut']['I']* nurses_per_bed_ICU * cost_per_bedday_ICU
 
-        st.success("**Staffing & Budget Requirements:**")
+        st.success("**Staffing and Cost Estimates:**")
 
+        st.markdown("#### Nursing Requirements")
         st.write("**IP Surge (Hs):**")
         st.write(f"🧑‍⚕️ Extra nurse shifts needed: {extra_nurse_shifts_Hs:.0f}")
         st.write(f"💰 Total surge cost: ${total_cost_Hs:,.0f}")
@@ -334,43 +383,120 @@ elif mode=="Transient surge":
         st.write(f"🧑‍⚕️ Extra nurse shifts needed: {extra_nurse_shifts_ICU:.0f}")
         st.write(f"💰 Total surge cost: ${total_cost_ICU:,.0f}")
 
-        st.write(f"📅 **Total extra workload:** {res['extra_beddays_total']:.1f} bed-days")
-
-
-
-        st.markdown("### 🧮 Additional Staffing & Resource Costs")
-
+        #st.write(f"📅 **Total extra workload:** {res['extra_beddays_total']:.1f} bed-days")
+        st.markdown("#### Additional Staffing Requirements")
         total_extra_cost_resources = 0.0
 
         for r in st.session_state.resources:
             if r["unit"] == "All":
-                beddays = res['extra_beddays_total']
+                beddays = res['extra_beddays_total_cut']
             else:
-                beddays = res['extra_beddays_per_comp'][r["unit"]]
+                beddays = res['extra_beddays_per_comp_cut'][r["unit"]]
 
-            extra_shifts = beddays * r["staff_per_bed"] * r["shifts_per_day"]
-            cost = extra_shifts * r["cost_per_shift"]
+            extra_shifts = beddays * r["staff_per_bed"]* r["shifts_per_day"]
+
+            cost = beddays * r["staff_per_bed"]  * r["cost_per_bed-day"]
+            #cost = beddays * r["cost_per_shift"]
 
             total_extra_cost_resources += cost
 
-            st.write(
-                f"**{r['name']} ({r['unit']})** — "
-                f"🧑‍⚕️ {extra_shifts:.0f} shifts, "
-                f"💰 ${cost:,.0f}"
-            )
-
-        st.markdown("---")
+            st.write(f"**{r['unit']}:**")
+            st.write(f"🧑‍⚕️ Extra {r['name']} shifts needed: {extra_shifts:.0f}")
+            st.write(f"💰 Total surge cost: ${cost:,.0f}")
+            #st.write( f"**{r['name']} ({r['unit']})** — " f"🧑‍⚕️ {extra_shifts:.0f} shifts, " f"💰 ${cost:,.0f}" )
+            #st.write( f"**{r['name']} ({r['unit']})** — " f"🧑‍⚕️ {extra_shifts:.0f} shifts, " f"💰 ${cost:,.0f}" )
 
         # ---- TOTAL COST SUMMATION ----
-        total_cost_all = total_cost_Hs + total_cost_Hm + total_cost_ICU +total_extra_cost_resources
 
         st.markdown("---")
         st.subheader("💵 Total Surge Cost Summary")
-        st.write(f"**Total cost across all units:** ${total_cost_all:,.0f}")
-        st.write(f"📅 **Total extra workload:** {res['extra_beddays_total']:.1f} bed-days")
+        total_cost_all = total_cost_Hs + total_cost_Hm + total_cost_ICU + total_extra_cost_resources
 
+        st.write(f"**Total cost across all units:** ${total_cost_all:,.0f}")
+        #st.write(f"📅 **Total extra workload:** {res['extra_beddays_total']:.1f} bed-days")
+
+        st.write("#### Weekly Surge Cost Breakdown")
+
+        # cost per bed-day dictionary
+        cost_per_bedday = {
+            "Hs": cost_per_bedday_Hs,
+            "Hm": cost_per_bedday_Hm,
+            "ICU": cost_per_bedday_ICU
+        }
+
+        nurses_per_bed = {
+            "Hs": nurses_per_bed_Hs,
+            "Hm": nurses_per_bed_Hm,
+            "ICU": nurses_per_bed_ICU
+        }
+
+        # compute weekly cost per compartment
+        df_cost_weeks = df_weeks.copy()
+
+        for unit in ["Hs", "Hm", "ICU"]:
+            df_cost_weeks[unit] = df_cost_weeks[unit] * nurses_per_bed[unit] * cost_per_bedday[unit]
+        df_cost_weeks["Total"] = df_cost_weeks[["Hs", "Hm", "ICU"]].sum(axis=1)
+
+        ###########
+        # Weekly cost from added resources (cost per bed-day)
+        df_resource_cost_weeks = pd.DataFrame(
+            0.0,
+            index=df_weeks.index,
+            columns=["Total"]
+        )
+
+        for r in st.session_state.resources:
+
+            if r["unit"] == "All":
+                weekly_beddays = df_weeks["Total"]
+            else:
+                weekly_beddays = df_weeks[r["unit"]]
+
+            # ✅ cost per bed-day → direct multiplication
+            weekly_cost = weekly_beddays * r["cost_per_bed-day"] * r["staff_per_bed"]
+
+            df_resource_cost_weeks["Total"] += weekly_cost
+
+        df_cost_weeks_all = df_cost_weeks.copy()
+        df_cost_weeks_all["Total"] += df_resource_cost_weeks["Total"]
+
+
+        st.dataframe(
+            df_cost_weeks_all.style.format("${:,.0f}"),
+            use_container_width=True
+        )
+
+        ##########
+
+
+        # st.dataframe(
+        #     df_cost_weeks.style.format("${:,.0f}"),
+        #     use_container_width=True
+        # )
 
         #st.subheader("💵 Total Surge Resource Cost")
         #st.write(f"**${total_extra_cost_resources:,.0f}**")
-
     # Add this section to your Streamlit app
+
+
+    #
+    #
+    # init_day_str=  '2024-01-01'
+    # end_day_str= '2025-03-31'
+    #
+    # surge_specs = { "Hs": [],
+    #     "Hm": [(3.0, 5.0, 1.0)],  # ONLY medical beds surge
+    #     "I": [] }
+    #
+    # dt = 1.0
+    # t_end = 50
+    # times = np.arange(0, t_end + dt, dt)
+    #
+    # res = transient_response_for_multi_surge(surge_specs, times)
+    #
+    # x_ts = res["x_ts"]
+    # x0 = res["x0"]
+    # extra_beds_over_time = x_ts - x0
+
+
+#Hm 6 extra bed
