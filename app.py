@@ -216,9 +216,9 @@ else :
     # --------------------------------------------------------------------
     # Weekly aggregation of bed-day workload
     # --------------------------------------------------------------------
-    st.write("### 🗓️ Weekly Bed-Day Workload")
-    st.caption("Weekly aggregation of extra occupied beds (bed-days)")
-
+    #st.write("### 🗓️ Weekly Bed-Day Workload")
+    #st.caption("Weekly aggregation of extra occupied beds (bed-days)")
+    # it is not showed in the app
     n_days, n_units = extra_beds_over_time_cut.shape
     n_weeks = int(np.ceil(n_days / 7))
 
@@ -237,7 +237,36 @@ else :
     df_weeks["Total"] = df_weeks.sum(axis=1)      #  - Row-wise: total workload per week
     df_weeks.loc["Total"] = df_weeks.sum(axis=0)  #  - Column-wise: total workload per unit across all weeks
 
-    st.dataframe(df_weeks)
+    #st.dataframe(df_weeks)
+
+    #st.write("### 📈 Weekly Peak Extra Bed Requirements")
+    #st.caption("Maximum number of extra beds needed on any single day within each week")
+
+    # ------------------------------------------------------------
+    # Weekly peak (max daily) extra beds by unit
+    # ------------------------------------------------------------
+
+    # Reshape padded data into (weeks × days × units)
+    extra_by_week = extra_padded.reshape(n_weeks, 7, n_units)
+
+    # Take the maximum across days within each week
+    weeks_peak = extra_by_week.max(axis=1)  # shape: (n_weeks, n_units)
+
+    # Build weekly peak table
+    df_weeks_peak = pd.DataFrame(
+        weeks_peak,
+        index=week_labels,
+        columns=unit_labels
+    )
+
+    # Add totals:
+    # - Row-wise: peak total extra beds across all units in that week
+    df_weeks_peak["Total"] = df_weeks_peak.sum(axis=1)
+
+    # - Column-wise: maximum weekly peak observed across the entire horizon
+    df_weeks_peak.loc["Max"] = df_weeks_peak.max(axis=0)
+
+    st.dataframe(df_weeks_peak)
 
     # --------------------------------------------------------------------
     # Staffing & Resource Planning Inputs
@@ -299,6 +328,13 @@ else :
     with icu_col3:
         nurse_shifts_per_day_ICU = st.number_input("Shifts per day", min_value=1, max_value=3, value=2, step=1,
                                              help="Typically 2-3 shifts per day", key="shifts_icu")
+    st.write("#### Nursing Capacity Assumptions")
+    max_shifts_per_staff_per_week = st.number_input(
+            "Maximum shifts per staff member per week",
+            min_value=1,
+            max_value=7,
+            value=5,
+            help="Used to convert required shifts into weekly staff headcount")
 
     #--------------------------------------------------------------------
     #   Additional Staffing / Resource Types (Non-nursing)
@@ -393,6 +429,9 @@ else :
         st.markdown("#### Additional Staffing Requirements")
         total_extra_cost_resources = 0.0
 
+
+
+
         for r in st.session_state.resources:
             if r["unit"] == "All":
                 beddays = res['extra_beddays_total_cut']
@@ -406,6 +445,7 @@ else :
             st.write(f"**{r['unit']}:**")
             st.write(f"🧑‍⚕️ Extra {r['name']} shifts needed: {extra_staff_shifts:.0f}")
             st.write(f"💰 Total surge cost: ${staff_cost:,.0f}")
+
         # --------------------------------------------------------------------
         #                 TOTAL COST SUMMATION
         # --------------------------------------------------------------------
@@ -418,9 +458,10 @@ else :
         # --------------------------------------------------------------------
         #                 Weekly Surge Cost Breakdown
         # --------------------------------------------------------------------
-        st.write("#### Weekly Surge Cost Breakdown")
+        #st.write("#### Weekly Surge Cost Breakdown")
         nurse_cost_per_bed_day = { "Hs": nurse_cost_per_bed_day_Hs,"Hm": nurse_cost_per_bed_day_Hm, "I": nurse_cost_per_bed_day_ICU}
         nurses_per_bed = { "Hs": nurses_per_bed_Hs, "Hm": nurses_per_bed_Hm, "I": nurses_per_bed_ICU}
+        nurse_shifts_per_day = { "Hs": extra_nurse_shifts_Hs, "Hm": extra_nurse_shifts_Hm, "I": extra_nurse_shifts_ICU}
 
         #-------- Compute weekly cost per compartment
         df_cost_weeks = df_weeks.copy()
@@ -445,6 +486,33 @@ else :
 
         df_cost_weeks_all = df_cost_weeks.copy()
         df_cost_weeks_all["Total"] += df_resource_cost_weeks["Total"]
-        st.dataframe( df_cost_weeks_all.style.format("${:,.0f}"))
+        #st.dataframe( df_cost_weeks_all.style.format("${:,.0f}"))
+    ################################## Working on this #########
+
+
+        st.write("### 👩‍⚕️ Weekly Nursing Requirements")
+        st.caption("Estimated additional nursing needed per week based on shift capacity")
+
+        df_staff_weeks = pd.DataFrame(index=df_weeks.index)
+
+        for unit in ["Hs", "Hm", "I"]:
+            weekly_shifts = (
+                    df_weeks[unit]
+                    * nurses_per_bed[unit]
+                    * nurse_shifts_per_day[unit]
+            )
+
+            df_staff_weeks[f"{unit} shifts"] = weekly_shifts
+            df_staff_weeks[f"{unit} staff"] = (
+                    weekly_shifts / max_shifts_per_staff_per_week)
+
+        # Total across units
+        df_staff_weeks["Total staff"] = (
+            df_staff_weeks[[f"{u} staff" for u in ["Hs", "Hm", "I"]]].sum(axis=1) )
+
+        st.dataframe(df_staff_weeks.round(1))
+
+
+
 
 
