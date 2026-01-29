@@ -1,13 +1,10 @@
 import numpy as np
-from scipy.integrate import odeint
-from scipy.optimize import minimize
 import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.optimize import least_squares
 
 
-
+#------ Read data sets and merge to have one data set with all the need columns  ----------------------
 def procces_data(init_day='2024-03-31', end_day='2025-03-31'):
+
     xls = pd.ExcelFile("data/IMPACTS Data Extract_V2.xlsx")
     data_ED = pd.read_excel('data/Patient Surge Model ED Data.xlsx')
 
@@ -16,6 +13,8 @@ def procces_data(init_day='2024-03-31', end_day='2025-03-31'):
 
     df_adt = pd.read_excel(xls, sheet_name="ADT Summary")
     df_adt_all = pd.read_excel(xls, sheet_name="Admission Breakdown")
+
+    # The data set V2 going beyond 2025-03-31, in order to merge all data sets at the same date with load data until that time
     df_adt_all = df_adt_all[df_adt_all.ADMIT_DATE <= '2025-03-31']
     df_ICU_downUp = pd.read_excel(xls, sheet_name='ICU DownUp')
 
@@ -26,7 +25,6 @@ def procces_data(init_day='2024-03-31', end_day='2025-03-31'):
     df_adt_all = df_adt_all.rename(columns={"ADMIT_DATE": "Date"})
     data_ED = data_ED.rename(columns={'ED_ARRIVAL_IMPUTED_DT': "Date"})
     df_ICU_downUp = df_ICU_downUp.rename({'Transfer_Date': 'Date'}, axis=1)
-
     df_ICU_downUp = df_ICU_downUp[df_ICU_downUp['Date'] <= '2025-03-31'].copy()
 
     df = pd.merge(df_adt_all, data_ED, on='Date')
@@ -36,13 +34,13 @@ def procces_data(init_day='2024-03-31', end_day='2025-03-31'):
     df = pd.merge(df, df_OR, on='Date')
 
     df = df.sort_values(by='Date').reset_index(drop=True)
-    #df = df[df['Date'] >= '2024-03-31']
     df = df[df['Date'] >= init_day]
     df = df[df['Date'] <= end_day]
-
+    # Convert to day the ED waiting and boarding interval, now they are in minutes
     df["AVERAGE_ED_WAITING_INTERVAL_DAYS"] = df["AVERAGE_ED_WAITING_INTERVAL"] / 1440
     df["AVERAGE_ED_BOARDING_INTERVAL_DAYS"] = df["AVERAGE_ED_BOARDING_INTERVAL"] / 1440
     return df
+
 
 
 def compute_params_from_df(df):
@@ -110,33 +108,5 @@ def compute_params_from_df(df):
             'varphi_I':varphi_I, 'varphi_D':varphi_D, 'varphi_Hm':varphi_Hm, 'psi_I':psi_I, 'psi_D':psi_D,
             'eps_Hs':eps_Hs, 'eps_Hm':eps_Hm, 'eps_D':eps_D}
 
-
-def compute_week_parameters(df):
-    df['weekday'] = df['Date'].dt.day_name()
-
-    df['varphi_I_daily'] = df['IP_Surge_TO_ICU'] / df['OCC_BEDS_IP_SURGE'].replace(0, np.nan)
-    df['varphi_D_daily'] = df['Discharges_IP_Surge'] / df['OCC_BEDS_IP_SURGE'].replace(0, np.nan)
-
-    df['psi_I_daily'] = df['MED_SURG_TELE_TO_ICU'] / df['OCC_BEDS_MED_SURG_TELE'].replace(0, np.nan)
-    df['psi_D_daily'] = df['Discharges_MED_SURG_TELE'] / df['OCC_BEDS_MED_SURG_TELE'].replace(0, np.nan)
-
-    df['eps_Hs_daily'] = df['ICU_TO_IP_Surge'] / df['OCC_BEDS_ICU'].replace(0, np.nan)
-    df['eps_Hm_daily'] = df['ICU_TO_MED_SURG_TELE'] / df['OCC_BEDS_ICU'].replace(0, np.nan)
-    df['eps_D_daily'] = df['Discharges_ICU'] / df['OCC_BEDS_ICU'].replace(0, np.nan)
-
-    weekday_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-
-    # Compute mean per weekday for the rates with weekday effect
-    varphi_I_weekday = df.groupby('weekday')['varphi_I_daily'].mean().reindex(weekday_order)
-    varphi_D_weekday = df.groupby('weekday')['varphi_D_daily'].mean().reindex(weekday_order)
-    psi_D_weekday = df.groupby('weekday')['psi_D_daily'].mean().reindex(weekday_order)
-    psi_I_weekday = df.groupby('weekday')['psi_I_daily'].mean().reindex(weekday_order)
-
-    eps_Hm_weekday = df.groupby('weekday')['eps_Hm_daily'].mean().reindex(weekday_order)
-    eps_D_weekday = df.groupby('weekday')['eps_D_daily'].mean().reindex(weekday_order)
-    eps_Hs_weekday = df.groupby('weekday')['eps_Hs_daily'].mean().reindex(weekday_order)
-
-    return {'varphi_I_weekday': varphi_I_weekday, 'varphi_D_weekday': varphi_D_weekday, 'psi_D_weekday':psi_D_weekday,
-            'psi_I_weekday':psi_I_weekday, 'eps_Hm_weekday':eps_Hm_weekday,'eps_D_weekday':eps_D_weekday, 'eps_Hs_weekday':eps_Hs_weekday}
 
 

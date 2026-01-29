@@ -1,25 +1,19 @@
 from data_params import *
-from BayesianFunc import BayesianFunctions
-import numpy as np
-from scipy.linalg import expm
 import matplotlib.pyplot as plt
 from scipy.linalg import expm
-from scipy.linalg import expm
 import numpy as np
-from copy import deepcopy
-from scipy.interpolate import interp1d
+
 
 plt.rcParams.update({'font.size': 18, 'axes.labelsize': 22,   'axes.titlesize': 22,  'xtick.labelsize': 20,
     'ytick.labelsize': 20,   'legend.fontsize': 22})
 
-bayes_func = BayesianFunctions()
+#---- Read data, starting from 2024-01-01 to 2025-03-31
 df = procces_data(init_day='2024-01-01')
 
-
-MIN2DAY = 1.0 / 1440.0
+#---- Load fixed parameters computes in data_params.py
 fixed_params = compute_params_from_df(df)
 
-#df = df[df['Date'] >= '2025-02-23'] #######
+
 arrivals = df['DAILY_ED_ARRIVALS'].values
 T = len(arrivals)
 t_data = np.arange(len(arrivals))
@@ -57,12 +51,15 @@ At_Hs_mean = At_Hs.mean()
 At_Hm_mean = At_Hm.mean()
 At_ICU_mean = At_ICU.mean()
 
-
+# Equilibrium calculation using the paramters of the model estiamted with the data df
 def compute_equilibrium_data(fixed_params, arrivals_mean, Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean,
                              At_Hs_mean, At_Hm_mean, At_ICU_mean):
+    # fixed_params: dictionary, with all the model's parameters
+    # arrivals_mean: float
+    #Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean, At_Hs_mean, At_Hm_mean, At_ICU_mean): float
+    # Read fixed parameters
     sigma = fixed_params['sigma']
     omega = fixed_params['omega']
-
     pED_Hs = fixed_params['pED_Hs']
     pED_Hm = fixed_params['pED_Hm']
     pED_ICU = fixed_params['pED_ICU']
@@ -76,14 +73,13 @@ def compute_equilibrium_data(fixed_params, arrivals_mean, Ad_Hs_mean, Ad_Hm_mean
     varphi_Hm = fixed_params['varphi_Hm']
     eps_Hs = fixed_params['eps_Hs']
 
-    ###############################
     gamma = fixed_params['gamma']
     eps_Hm = fixed_params['eps_Hm']
     psi_D = fixed_params['psi_D']
     psi_I = fixed_params['psi_I']
     eps_D = fixed_params['eps_D']
 
-    # Step 2a: upstream compartments
+    # Compute the analytical equilibirum for W and S, (W*, S*)
     W_star = arrivals_mean / (sigma + omega)
     S_star = sigma * W_star / gamma
 
@@ -91,11 +87,12 @@ def compute_equilibrium_data(fixed_params, arrivals_mean, Ad_Hs_mean, Ad_Hm_mean
     B_Hm_star = pED_Hm * gamma * S_star / xi_Hm
     B_I_star = pED_ICU * gamma * S_star / xi_I
 
-    # Step 2b: total admissions including external and internal
+    # Compute total admissions including those from ED: xi_var * B_var_star external and directs (At_Hs_mean, Ad_Hs_mean  )
     A_Hs = xi_Hs * B_Hs_star + Ad_Hs_mean + At_Hs_mean
     A_Hm = xi_Hm * B_Hm_star + Ad_Hm_mean + At_Hm_mean
     A_I = xi_I * B_I_star + Ad_ICU_mean + At_ICU_mean
 
+    # Reduced system to estimate Hs*, Hm*, I*
     A_mat = np.array([[varphi_I + varphi_D + varphi_Hm, 0, -eps_Hs],
         [-varphi_Hm, psi_I + psi_D, -eps_Hm],
         [-varphi_I, -psi_I, eps_Hs + eps_Hm + eps_D]])
@@ -106,6 +103,8 @@ def compute_equilibrium_data(fixed_params, arrivals_mean, Ad_Hs_mean, Ad_Hm_mean
     return { "W": W_star, "S": S_star, "B_Hs": B_Hs_star, "B_Hm": B_Hm_star,  "B_I": B_I_star, "Hs": Hs_star,
              "Hm": Hm_star,  "I": I_star, "D": D_star }
 
+
+# To compute the Jacobian at equilibirum, we will use this function later
 def jacobian_at_equilibrium(fixed_params):
     varphi_I = fixed_params['varphi_I']
     varphi_D = fixed_params['varphi_D']
@@ -135,10 +134,11 @@ def active_surge_amplitude(t, windows, baseline):
     amp = baseline
     for (t0, t1, a) in windows:
         if t0 <= t <= t1:
-            amp += (a - baseline)
+            amp += a #(a - baseline)
     return amp
 
 
+# This is the analytical model, I kept here to check all the analytical computation to get the surge event are correct
 def ed_ode(y, t, surge_specs):
     W, S, B_Hs, B_Hm, B_I, Hs, Hm, I, D = y
 
@@ -171,7 +171,6 @@ def ed_ode(y, t, surge_specs):
     psi_D = fixed_params['psi_D']
 
     lam = arrivals_mean
-
     dW = lam - (sigma + omega) * W
     dS = sigma * W - gamma * S
 
@@ -194,14 +193,10 @@ def ed_ode(y, t, surge_specs):
 def transient_response_for_multi_surge(surge_specs, times):
 
     # Baseline equilibrium
-    eq = compute_equilibrium_data(
-        fixed_params, arrivals_mean,
-        Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean,
-        At_Hs_mean, At_Hm_mean, At_ICU_mean
-    )
+    eq = compute_equilibrium_data(fixed_params, arrivals_mean,
+        Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean, At_Hs_mean, At_Hm_mean, At_ICU_mean )
 
     x0 = np.array([eq['Hs'], eq['Hm'], eq['I']])
-
     J_full, eigvals = jacobian_at_equilibrium(fixed_params)
     J = J_full[:3, :3]
 
@@ -210,32 +205,25 @@ def transient_response_for_multi_surge(surge_specs, times):
 
     # Precompute equilibrium shifts per surge event
     surge_deltas = []
-
     for comp, windows in surge_specs.items():
         for (t_on, t_off, amp) in windows:
-            xs = compute_equilibrium_data(
-                fixed_params,
-                arrivals_mean,
+            xs = compute_equilibrium_data(fixed_params, arrivals_mean,
                 amp + Ad_Hs_mean if comp == 'Hs' else Ad_Hs_mean,
                 amp + Ad_Hm_mean  if comp == 'Hm' else Ad_Hm_mean,
                 amp + Ad_ICU_mean if comp == 'I'  else Ad_ICU_mean,
-                At_Hs_mean, At_Hm_mean, At_ICU_mean
-            )
+                At_Hs_mean, At_Hm_mean, At_ICU_mean )
             x_step = np.array([xs['Hs'], xs['Hm'], xs['I']])
             surge_deltas.append((t_on, t_off, x_step - x0))
 
     # Superposition of linear responses
     for k, t in enumerate(times):
         z = np.zeros(3)
-
         for (t_on, t_off, delta_eq) in surge_deltas:
             if t < t_on:
                 continue
-
             elif t_on <= t <= t_off:
                 tau = t - t_on
                 z += (np.eye(3) - expm(J * tau)).dot(delta_eq)
-
             else:
                 tau_s = t_off - t_on
                 z_T = (np.eye(3) - expm(J * tau_s)).dot(delta_eq)
@@ -243,8 +231,6 @@ def transient_response_for_multi_surge(surge_specs, times):
 
         x_ts[k] = x0 + z
 
-
-    #######
     extra_beddays = np.trapz(np.sum(x_ts - x0, axis=1), times)  # total extra bed-days across all 3 comps
     extra_beddays_per_comp = {'Hs': np.trapz(x_ts[:, 0] - x0[0], times),
                               'Hm': np.trapz(x_ts[:, 1] - x0[1], times),
@@ -260,20 +246,16 @@ def transient_response_for_multi_surge(surge_specs, times):
     #return {'times': times,  'x_ts': x_ts, 'x0': x0,  'eigvals': eigvals }
 
 
+# To check my analytical implementation gives the same results than those obtained using thee ODE
 if __name__ == '__main__':
-
     # --------------------------------------------------
     # 1) Define surge events (MULTIPLE per compartment)
     #    Each tuple = (start_day, end_day, amplitude)
     # --------------------------------------------------
-    surge_specs1 = {
-        'Hs': [ (3, 7,  2), (8, 10, 5) ],
-        'Hm': [ (1, 10,  2), (5, 20, 1) ],
-        'I': [ (3, 4,  1) ]}
     surge_specs = {
-        'Hs': [ (3, 7,  2 + Ad_Hs_mean), (8, 10, 5 + Ad_Hs_mean)],
-        'Hm': [(1, 10,   2 + Ad_Hm_mean),(5, 20, 1+ Ad_Hm_mean)],
-        'I': [(3, 4, 1 + Ad_ICU_mean)]}
+        'Hs': [ (3, 7,  2 ), (8, 10, 5)],
+        'Hm': [(1, 10,   2 ),(5, 20, 1)],
+        'I': [(3, 4, 1)]}
 
     # --------------------------------------------------
     # 2) Time grid (SHARED by ODE and analytic solution)
@@ -302,7 +284,7 @@ if __name__ == '__main__':
     # --------------------------------------------------
     # 5) Solve LINEARIZED ANALYTIC MODEL
     # --------------------------------------------------
-    res = transient_response_for_multi_surge(surge_specs1, times)
+    res = transient_response_for_multi_surge(surge_specs, times)
     x_ts = res['x_ts']
 
     # --------------------------------------------------
@@ -325,51 +307,4 @@ if __name__ == '__main__':
     fig.suptitle('Multi-surge validation: analytic vs ODE', fontsize=16)
     plt.tight_layout()
     plt.show()
-
-
-
-# def transient_response_for_surge(ad_hs, ad_hm, ad_icu, T_surge=14, dt=1):
-#     equilibrium = compute_equilibrium_data(fixed_params, arrivals_mean, Ad_Hs_mean, Ad_Hm_mean, Ad_ICU_mean,
-#                                            At_Hs_mean, At_Hm_mean, At_ICU_mean)
-#
-#     # baseline downstream equilibrium vector x0 (Hs,Hm,I)
-#     x0 = np.array([equilibrium['Hs'], equilibrium['Hm'], equilibrium['I']], dtype=float)
-#     xs = compute_equilibrium_data(fixed_params, arrivals_mean, ad_hs, ad_hm, ad_icu,
-#                                            At_Hs_mean, At_Hm_mean, At_ICU_mean)
-#     x_step =  np.array([xs['Hs'], xs['Hm'], xs['I']])
-#     J_full, eigvals = jacobian_at_equilibrium(fixed_params)
-#     J = J_full[:3, :3]
-#
-#     # Precompute matrix exponential function for multiples of dt
-#     times = np.arange(0, T_surge + 80, dt)  # simulate some relaxation after surge
-#     x_ts = np.zeros((len(times), 3))
-#     # initial state is baseline equilibrium
-#     x_ts[0,:] = x0.copy()
-#     delta_eq = x_step - x0
-#     for k, t in enumerate(times):
-#         if t <= T_surge:
-#             y_t = (np.eye(3) - expm(J*t)).dot(delta_eq)
-#             x_ts[k,:] = x0 + y_t
-#         else:
-#             x_Ts = x0 + (np.eye(3) - expm(J*T_surge)).dot(delta_eq)
-#             tau = t - T_surge
-#             x_ts[k,:] = x0 + expm(J*tau).dot(x_Ts - x0)
-#
-#     # compute cumulative extra bed-days during [0, times[-1]]: integrate (x(t)-x0)
-#     dt_arr = np.diff(times, prepend=0)
-#     extra_beddays = np.trapz(np.sum(x_ts - x0, axis=1), times)  # total extra bed-days across all 3 comps
-#     extra_beddays_per_comp = { 'Hs': np.trapz(x_ts[:,0]-x0[0], times),
-#                                'Hm': np.trapz(x_ts[:,1]-x0[1], times),
-#                                'I' : np.trapz(x_ts[:,2]-x0[2], times) }
-#
-#     # Pack results
-#     ts_results = {'times': times, 'x_ts': x_ts, 'x0': x0, 'x_step': x_step,
-#                   'extra_beddays_total': extra_beddays,
-#                   'extra_beddays_per_comp': extra_beddays_per_comp,
-#                   'eigvals': eigvals}
-#     return ts_results
-
-#
-# def is_in_any_window(t, windows):
-#     return any(t0 <= t <= t1 for (t0, t1) in windows)
 
